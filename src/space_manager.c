@@ -112,6 +112,10 @@ void space_manager_refresh_view(struct space_manager *sm, uint64_t sid)
 {
     struct view *view = space_manager_find_view(sm, sid);
     if (view->layout == VIEW_FLOAT) return;
+    view->left_padding = sm->left_padding;
+    view->right_padding = sm->right_padding;
+    view->top_padding = sm->top_padding;
+    view->bottom_padding = sm->bottom_padding; 
 
     view_update(view);
     view_flush(view);
@@ -125,9 +129,66 @@ void space_manager_mark_view_invalid(struct space_manager *sm,  uint64_t sid)
     view->is_valid = false;
 }
 
+#define AUTO_PAD_MIN_ASPECT 20. / 9.
+#define OPTIMAL_WIDTH 840
+#define OPTIMAL_HEIGHT 1200
+bool space_manager_auto_pad_untile_window(struct space_manager* sm, struct view* view, struct window* window) {
+    uint32_t did = space_display_id(view->sid);
+    CGRect frame = CGDisplayBounds(did);
+    uint32_t window_count = view_window_count(view);
+
+    uint32_t fit = frame.size.width / OPTIMAL_WIDTH;
+    if (window_count > 0 && window_count - 1 <= fit) {
+      if (window_count == 2 && fit >= 2) {
+        uint32_t gaps = 0;
+        view->left_padding = (frame.size.width - gaps - (window_count) * OPTIMAL_WIDTH) / 2;
+        view->right_padding = (frame.size.width - gaps - (window_count) * OPTIMAL_WIDTH) / 2;
+      } else if (window_count == 2) {
+          view->left_padding = sm->left_padding;
+          view->right_padding = sm->right_padding;
+      } else {
+        uint32_t gaps = window_count > 2 ? (window_count - 2) * view->window_gap : 0;
+        view->left_padding = (frame.size.width - gaps - (window_count - 1) * OPTIMAL_WIDTH) / 2;
+        view->right_padding = (frame.size.width - gaps - (window_count - 1) * OPTIMAL_WIDTH) / 2;
+      }
+
+
+      if (frame.size.height > OPTIMAL_HEIGHT) {
+        view->top_padding = (frame.size.height - OPTIMAL_HEIGHT) / 2;
+        view->bottom_padding = (frame.size.height - OPTIMAL_HEIGHT) / 2;
+      }
+      sm->auto_balance = true;
+      struct window_node *node = view_remove_window_node(view, window);
+      if (!node) {
+        sm->auto_balance = false;
+        view->left_padding = sm->left_padding;
+        view->right_padding = sm->right_padding;
+        view->top_padding = sm->top_padding;
+        view->bottom_padding = sm->bottom_padding; 
+        view_update(view);
+        return true;
+      }
+      if (space_is_visible(view->sid)) {
+          window_node_flush(node);
+      } else {
+          view->is_dirty = true;
+      }
+      return true;
+    }
+
+    sm->auto_balance = false;
+    return false;
+}
+
 void space_manager_untile_window(struct space_manager *sm, struct view *view, struct window *window)
 {
     if (view->layout == VIEW_FLOAT) return;
+
+    uint32_t did = space_display_id(view->sid);
+    CGRect frame = CGDisplayBounds(did);
+    if (frame.size.width / frame.size.height > AUTO_PAD_MIN_ASPECT
+        && frame.size.height > OPTIMAL_HEIGHT
+        && space_manager_auto_pad_untile_window(sm, view, window)) return;
 
     struct window_node *node = view_remove_window_node(view, window);
     if (!node) return;
@@ -385,10 +446,83 @@ bool space_manager_balance_space(struct space_manager *sm, uint64_t sid, uint32_
     return true;
 }
 
+struct view* space_manager_auto_pad_view_insertion(struct space_manager* sm, struct view* view, struct window* window, uint32_t insertion_point) {
+    uint32_t did = space_display_id(view->sid);
+    CGRect frame = CGDisplayBounds(did);
+    uint32_t window_count = view_window_count(view);
+
+    uint32_t fit = frame.size.width / OPTIMAL_WIDTH;
+    if (window_count + 1 <= fit) {
+      if (window_count == 0 && fit >= 2) {
+        uint32_t gaps = 0;
+        view->left_padding = (frame.size.width - gaps - (window_count + 2) * OPTIMAL_WIDTH) / 2;
+        view->right_padding = (frame.size.width - gaps - (window_count + 2) * OPTIMAL_WIDTH) / 2;
+      } else if (window_count == 0) {
+        view->left_padding = sm->left_padding;
+        view->right_padding = sm->right_padding;
+      } else {
+        uint32_t gaps = window_count + 1 > 1 ? (window_count) * view->window_gap : 0;
+        view->left_padding = (frame.size.width - gaps - (window_count + 1) * OPTIMAL_WIDTH) / 2;
+        view->right_padding = (frame.size.width - gaps - (window_count + 1) * OPTIMAL_WIDTH) / 2;
+      }
+
+      if (frame.size.height > OPTIMAL_HEIGHT) {
+        view->top_padding = (frame.size.height - OPTIMAL_HEIGHT) / 2;
+        view->bottom_padding = (frame.size.height - OPTIMAL_HEIGHT) / 2;
+      } else {
+        view->top_padding = sm->top_padding;
+        view->bottom_padding = sm->bottom_padding;
+      }
+      
+      sm->split_type = SPLIT_Y;
+      sm->auto_balance = true;
+      view_update(view);
+      struct window_node *node = view_add_window_node_with_insertion_point(view, window, insertion_point);
+      if (space_is_visible(view->sid)) {
+          window_node_flush(node);
+      } else {
+          view->is_dirty = true;
+      }
+      return view;
+    } else if (view->left_padding != sm->left_padding
+               || view->right_padding != sm->right_padding
+               || view->top_padding != sm->top_padding
+               || view->bottom_padding != sm->bottom_padding) {
+        view->left_padding = sm->left_padding;
+        view->right_padding = sm->right_padding;
+        view->top_padding = sm->top_padding;
+        view->bottom_padding = sm->bottom_padding; 
+        sm->split_type = (window_count == 1) ? SPLIT_Y : SPLIT_X;
+        sm->auto_balance = true;
+        struct window_node *node = view_add_window_node_with_insertion_point(view, window, insertion_point);
+        if (space_is_visible(view->sid)) {
+            window_node_flush(node);
+        } else {
+            view->is_dirty = true;
+        }
+        sm->auto_balance = false;
+        sm->split_type = SPLIT_AUTO;
+        return view;
+    }
+
+    sm->auto_balance = false;
+    sm->split_type = SPLIT_AUTO;
+
+    return NULL;
+}
+
 struct view *space_manager_tile_window_on_space_with_insertion_point(struct space_manager *sm, struct window *window, uint64_t sid, uint32_t insertion_point)
 {
     struct view *view = space_manager_find_view(sm, sid);
     if (view->layout == VIEW_FLOAT) return view;
+
+    uint32_t did = space_display_id(view->sid);
+    CGRect frame = CGDisplayBounds(did);
+    if (frame.size.width / frame.size.height > AUTO_PAD_MIN_ASPECT
+        && frame.size.height > OPTIMAL_HEIGHT) {
+      struct view* auto_padded_view = space_manager_auto_pad_view_insertion(sm, view, window, insertion_point);
+      if (auto_padded_view) return auto_padded_view;
+    }
 
     struct window_node *node = view_add_window_node_with_insertion_point(view, window, insertion_point);
     assert(node);
